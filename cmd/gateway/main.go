@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/carissaayo/go-api-gateway/internal/config"
 	"github.com/carissaayo/go-api-gateway/internal/gateway"
+	"github.com/carissaayo/go-api-gateway/internal/logger"
 )
 
 func main() {
@@ -21,13 +21,15 @@ func main() {
 
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
+		// Logger not available yet, use stderr
+		os.Stderr.WriteString("failed to load config: " + err.Error() + "\n")
 		os.Exit(1)
 	}
 
-	gw := gateway.New(cfg)
+	log := logger.New(cfg.Logging.Level, cfg.Logging.Format)
 
-	// Start server in a goroutine so it doesn't block signal handling
+	gw := gateway.New(cfg, log)
+
 	errCh := make(chan error, 1)
 	go func() {
 		if err := gw.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -36,26 +38,22 @@ func main() {
 		close(errCh)
 	}()
 
-	// Block until we receive SIGINT or SIGTERM
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	select {
 	case sig := <-quit:
-		fmt.Printf("\nReceived %s, shutting down...\n", sig)
+		log.Info().Str("signal", sig.String()).Msg("received shutdown signal")
 	case err := <-errCh:
-		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
-		os.Exit(1)
+		log.Fatal().Err(err).Msg("server error")
 	}
 
-	// Give in-flight requests 10 seconds to complete
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := gw.Shutdown(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "shutdown error: %v\n", err)
-		os.Exit(1)
+		log.Fatal().Err(err).Msg("shutdown error")
 	}
 
-	fmt.Println("Gateway stopped gracefully")
+	log.Info().Msg("gateway stopped gracefully")
 }
