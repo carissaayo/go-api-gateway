@@ -14,6 +14,7 @@ import (
 	"github.com/carissaayo/go-api-gateway/internal/config"
 	"github.com/carissaayo/go-api-gateway/internal/gateway"
 	"github.com/carissaayo/go-api-gateway/internal/logger"
+	"github.com/carissaayo/go-api-gateway/internal/storage"
 )
 
 func main() {
@@ -21,14 +22,24 @@ func main() {
 
 	cfg, err := config.Load()
 	if err != nil {
-		// Logger not available yet, use stderr
 		os.Stderr.WriteString("failed to load config: " + err.Error() + "\n")
 		os.Exit(1)
 	}
 
 	log := logger.New(cfg.Logging.Level, cfg.Logging.Format)
 
-	gw := gateway.New(cfg, log)
+	// Connect to MongoDB
+	db, err := storage.NewMongoDB(context.Background(), cfg.MongoDB.URI, cfg.MongoDB.Database)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to connect to mongodb")
+	}
+	defer db.Close(context.Background())
+
+	log.Info().Msg("connected to mongodb")
+
+	apiKeyRepo := storage.NewAPIKeyRepository(db)
+
+	gw := gateway.New(cfg, log, apiKeyRepo)
 
 	errCh := make(chan error, 1)
 	go func() {

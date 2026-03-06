@@ -10,16 +10,18 @@ import (
 
 	"github.com/carissaayo/go-api-gateway/internal/config"
 	"github.com/carissaayo/go-api-gateway/internal/middleware"
+	"github.com/carissaayo/go-api-gateway/internal/storage"
 )
 
 type Gateway struct {
-	config *config.Config
-	router chi.Router
-	server *http.Server
-	log    zerolog.Logger
+	config     *config.Config
+	router     chi.Router
+	server     *http.Server
+	log        zerolog.Logger
+	apiKeyRepo *storage.APIKeyRepository
 }
 
-func New(cfg *config.Config, log zerolog.Logger) *Gateway {
+func New(cfg *config.Config, log zerolog.Logger, apiKeyRepo *storage.APIKeyRepository) *Gateway {
 	r := chi.NewRouter()
 
 	gw := &Gateway{
