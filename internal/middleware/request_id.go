@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -10,6 +11,8 @@ import (
 type contextKey string
 
 const RequestIDKey contextKey = "request_id"
+
+var ErrKeyNotFound = errors.New("api key not found")
 
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

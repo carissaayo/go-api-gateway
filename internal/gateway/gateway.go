@@ -14,20 +14,23 @@ import (
 )
 
 type Gateway struct {
-	config     *config.Config
-	router     chi.Router
-	server     *http.Server
-	log        zerolog.Logger
-	apiKeyRepo *storage.APIKeyRepository
+	config        *config.Config
+	router        chi.Router
+	server        *http.Server
+	log           zerolog.Logger
+	apiKeyRepo    *storage.APIKeyRepository
+	apiKeyAdapter *storage.APIKeyAdapter
 }
 
 func New(cfg *config.Config, log zerolog.Logger, apiKeyRepo *storage.APIKeyRepository) *Gateway {
 	r := chi.NewRouter()
-
+	adapter := storage.NewAPIKeyAdapter(apiKeyRepo)
 	gw := &Gateway{
-		config: cfg,
-		router: r,
-		log:    log,
+		config:        cfg,
+		router:        r,
+		log:           log,
+		apiKeyRepo:    apiKeyRepo,
+		apiKeyAdapter: adapter,
 		server: &http.Server{
 			Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
 			Handler:      r,
@@ -51,6 +54,20 @@ func (gw *Gateway) setupMiddleware() {
 func (gw *Gateway) setupRoutes() {
 	gw.router.Get("/health", gw.healthCheck)
 	gw.router.Get("/ready", gw.readinessCheck)
+	// Protected routes — auth middleware applied to this group only
+	gw.router.Group(func(r chi.Router) {
+		r.Use(middleware.Auth(gw.apiKeyAdapter, gw.log))
+		r.Get("/api/*", func(w http.ResponseWriter, r *http.Request) {
+			record := middleware.GetAPIKey(r.Context())
+			writeJSON(w, http.StatusOK, `{"message":"authenticated","user":"`+record.UserID+`"}`)
+		})
+	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	w.Write([]byte(body))
 }
 
 func (gw *Gateway) Start() error {
