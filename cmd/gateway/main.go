@@ -49,6 +49,9 @@ func main() {
 
 	gw := gateway.New(cfg, log, apiKeyRepo, rateLimiter)
 
+	if err := gw.RegisterBackend("test-service", "http://localhost:3001", 1); err != nil {
+		log.Fatal().Err(err).Msg("failed to register backend")
+	}
 	errCh := make(chan error, 1)
 	go func() {
 		if err := gw.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {

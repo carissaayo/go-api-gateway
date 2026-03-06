@@ -10,6 +10,7 @@ import (
 
 	"github.com/carissaayo/go-api-gateway/internal/config"
 	"github.com/carissaayo/go-api-gateway/internal/middleware"
+	"github.com/carissaayo/go-api-gateway/internal/proxy"
 	"github.com/carissaayo/go-api-gateway/internal/ratelimit"
 	"github.com/carissaayo/go-api-gateway/internal/storage"
 )
@@ -22,11 +23,13 @@ type Gateway struct {
 	apiKeyRepo    *storage.APIKeyRepository
 	apiKeyAdapter *storage.APIKeyAdapter
 	rateLimiter   *ratelimit.TokenBucket
+	proxy         *proxy.ReverseProxy
 }
 
 func New(cfg *config.Config, log zerolog.Logger, apiKeyRepo *storage.APIKeyRepository, rateLimiter *ratelimit.TokenBucket) *Gateway {
 	r := chi.NewRouter()
 	adapter := storage.NewAPIKeyAdapter(apiKeyRepo)
+	rp := proxy.New(log)
 	gw := &Gateway{
 		config:        cfg,
 		router:        r,
@@ -34,6 +37,7 @@ func New(cfg *config.Config, log zerolog.Logger, apiKeyRepo *storage.APIKeyRepos
 		apiKeyRepo:    apiKeyRepo,
 		apiKeyAdapter: adapter,
 		rateLimiter:   rateLimiter,
+		proxy:         rp,
 		server: &http.Server{
 			Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
 			Handler:      r,
@@ -61,10 +65,7 @@ func (gw *Gateway) setupRoutes() {
 	gw.router.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(gw.apiKeyAdapter, gw.log))
 		r.Use(middleware.RateLimit(gw.rateLimiter, gw.log))
-		r.Get("/api/*", func(w http.ResponseWriter, r *http.Request) {
-			record := middleware.GetAPIKey(r.Context())
-			writeJSON(w, http.StatusOK, `{"message":"authenticated","user":"`+record.UserID+`"}`)
-		})
+		r.Handle("/api/*", gw.proxy)
 	})
 }
 
