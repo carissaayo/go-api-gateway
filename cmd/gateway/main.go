@@ -14,6 +14,8 @@ import (
 	"github.com/carissaayo/go-api-gateway/internal/config"
 	"github.com/carissaayo/go-api-gateway/internal/gateway"
 	"github.com/carissaayo/go-api-gateway/internal/logger"
+	"github.com/carissaayo/go-api-gateway/internal/ratelimit"
+	redisclient "github.com/carissaayo/go-api-gateway/internal/redis"
 	"github.com/carissaayo/go-api-gateway/internal/storage"
 )
 
@@ -28,18 +30,24 @@ func main() {
 
 	log := logger.New(cfg.Logging.Level, cfg.Logging.Format)
 
-	// Connect to MongoDB
 	db, err := storage.NewMongoDB(context.Background(), cfg.MongoDB.URI, cfg.MongoDB.Database)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to connect to mongodb")
 	}
 	defer db.Close(context.Background())
-
 	log.Info().Msg("connected to mongodb")
 
-	apiKeyRepo := storage.NewAPIKeyRepository(db)
+	rc, err := redisclient.New(context.Background(), cfg.Redis.URL)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to connect to redis")
+	}
+	defer rc.Close()
+	log.Info().Msg("connected to redis")
 
-	gw := gateway.New(cfg, log, apiKeyRepo)
+	apiKeyRepo := storage.NewAPIKeyRepository(db)
+	rateLimiter := ratelimit.NewTokenBucket(rc.GetClient())
+
+	gw := gateway.New(cfg, log, apiKeyRepo, rateLimiter)
 
 	errCh := make(chan error, 1)
 	go func() {

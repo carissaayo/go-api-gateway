@@ -10,14 +10,19 @@ import (
 	"github.com/rs/zerolog"
 )
 
+type APIKeyRateLimit struct {
+	RequestsPerSecond int
+	BurstSize         int
+}
+
 type APIKeyRecord struct {
 	Key       string
 	UserID    string
 	Scopes    []string
 	Enabled   bool
 	ExpiresAt time.Time
+	RateLimit APIKeyRateLimit
 }
-
 type APIKeyLookup interface {
 	FindByKey(ctx context.Context, key string) (*APIKeyRecord, error)
 }

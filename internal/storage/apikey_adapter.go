@@ -29,5 +29,9 @@ func (a *APIKeyAdapter) FindByKey(ctx context.Context, key string) (*middleware.
 		Scopes:    apiKey.Scopes,
 		Enabled:   apiKey.Enabled,
 		ExpiresAt: apiKey.ExpiresAt,
+		RateLimit: middleware.APIKeyRateLimit{
+			RequestsPerSecond: apiKey.RateLimit.RequestsPerSecond,
+			BurstSize:         apiKey.RateLimit.BurstSize,
+		},
 	}, nil
 }

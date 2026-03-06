@@ -10,6 +10,7 @@ import (
 
 	"github.com/carissaayo/go-api-gateway/internal/config"
 	"github.com/carissaayo/go-api-gateway/internal/middleware"
+	"github.com/carissaayo/go-api-gateway/internal/ratelimit"
 	"github.com/carissaayo/go-api-gateway/internal/storage"
 )
 
@@ -20,9 +21,10 @@ type Gateway struct {
 	log           zerolog.Logger
 	apiKeyRepo    *storage.APIKeyRepository
 	apiKeyAdapter *storage.APIKeyAdapter
+	rateLimiter   *ratelimit.TokenBucket
 }
 
-func New(cfg *config.Config, log zerolog.Logger, apiKeyRepo *storage.APIKeyRepository) *Gateway {
+func New(cfg *config.Config, log zerolog.Logger, apiKeyRepo *storage.APIKeyRepository, rateLimiter *ratelimit.TokenBucket) *Gateway {
 	r := chi.NewRouter()
 	adapter := storage.NewAPIKeyAdapter(apiKeyRepo)
 	gw := &Gateway{
@@ -31,6 +33,7 @@ func New(cfg *config.Config, log zerolog.Logger, apiKeyRepo *storage.APIKeyRepos
 		log:           log,
 		apiKeyRepo:    apiKeyRepo,
 		apiKeyAdapter: adapter,
+		rateLimiter:   rateLimiter,
 		server: &http.Server{
 			Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
 			Handler:      r,
@@ -57,6 +60,7 @@ func (gw *Gateway) setupRoutes() {
 	// Protected routes — auth middleware applied to this group only
 	gw.router.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(gw.apiKeyAdapter, gw.log))
+		r.Use(middleware.RateLimit(gw.rateLimiter, gw.log))
 		r.Get("/api/*", func(w http.ResponseWriter, r *http.Request) {
 			record := middleware.GetAPIKey(r.Context())
 			writeJSON(w, http.StatusOK, `{"message":"authenticated","user":"`+record.UserID+`"}`)
