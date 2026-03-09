@@ -61,18 +61,27 @@ func (gw *Gateway) setupMiddleware() {
 func (gw *Gateway) setupRoutes() {
 	gw.router.Get("/health", gw.healthCheck)
 	gw.router.Get("/ready", gw.readinessCheck)
-	// Protected routes — auth middleware applied to this group only
+
 	gw.router.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(gw.apiKeyAdapter, gw.log))
 		r.Use(middleware.RateLimit(gw.rateLimiter, gw.log))
+		r.Use(middleware.Transform(middleware.TransformConfig{
+			Request: middleware.RequestTransform{
+				AddHeaders: map[string]string{
+					"X-Gateway-Version": "v1",
+				},
+				RemoveHeaders: []string{"X-Internal-Debug"},
+				StripPrefix:   "/api",
+			},
+			Response: middleware.ResponseTransform{
+				AddHeaders: map[string]string{
+					"X-Powered-By": "go-api-gateway",
+				},
+				RemoveHeaders: []string{"X-Internal-Token", "Server"},
+			},
+		}))
 		r.Handle("/api/*", gw.proxy)
 	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, body string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	w.Write([]byte(body))
 }
 
 func (gw *Gateway) Start() error {
