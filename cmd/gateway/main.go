@@ -45,13 +45,21 @@ func main() {
 	log.Info().Msg("connected to redis")
 
 	apiKeyRepo := storage.NewAPIKeyRepository(db)
+	backendRepo := storage.NewBackendRepository(db)
 	rateLimiter := ratelimit.NewTokenBucket(rc.GetClient())
 
 	gw := gateway.New(cfg, log, apiKeyRepo, rateLimiter)
 
-	if err := gw.RegisterBackend("test-service", "http://localhost:3001", 1); err != nil {
-		log.Fatal().Err(err).Msg("failed to register backend")
+	// Load backends from MongoDB
+	if err := gw.LoadBackends(context.Background(), backendRepo); err != nil {
+		log.Error().Err(err).Msg("failed to load backends from database")
 	}
+
+	// Watch for backend changes in background
+	watchCtx, watchCancel := context.WithCancel(context.Background())
+	defer watchCancel()
+	go gw.WatchBackends(watchCtx, backendRepo)
+
 	errCh := make(chan error, 1)
 	go func() {
 		if err := gw.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -69,6 +77,8 @@ func main() {
 	case err := <-errCh:
 		log.Fatal().Err(err).Msg("server error")
 	}
+
+	watchCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

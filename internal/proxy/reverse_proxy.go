@@ -121,3 +121,9 @@ func (rp *ReverseProxy) aliveBackends() []*Backend {
 	}
 	return alive
 }
+
+func (rp *ReverseProxy) ClearBackends() {
+	rp.mu.Lock()
+	rp.backends = nil
+	rp.mu.Unlock()
+}
