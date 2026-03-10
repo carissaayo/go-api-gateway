@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 
 	"github.com/carissaayo/go-api-gateway/internal/config"
@@ -61,7 +62,7 @@ func (gw *Gateway) setupMiddleware() {
 func (gw *Gateway) setupRoutes() {
 	gw.router.Get("/health", gw.healthCheck)
 	gw.router.Get("/ready", gw.readinessCheck)
-
+	gw.router.Handle("/metrics", promhttp.Handler())
 	gw.router.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(gw.apiKeyAdapter, gw.log))
 		r.Use(middleware.RateLimit(gw.rateLimiter, gw.log))
