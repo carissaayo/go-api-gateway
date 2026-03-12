@@ -17,28 +17,30 @@ import (
 )
 
 type Gateway struct {
-	config        *config.Config
-	router        chi.Router
-	server        *http.Server
-	log           zerolog.Logger
-	apiKeyRepo    *storage.APIKeyRepository
-	apiKeyAdapter *storage.APIKeyAdapter
-	rateLimiter   *ratelimit.TokenBucket
-	proxy         *proxy.ReverseProxy
+	config           *config.Config
+	router           chi.Router
+	server           *http.Server
+	log              zerolog.Logger
+	apiKeyRepo       *storage.APIKeyRepository
+	apiKeyAdapter    *storage.APIKeyAdapter
+	rateLimiter      *ratelimit.TokenBucket
+	proxy            *proxy.ReverseProxy
+	analyticsAdapter *storage.AnalyticsAdapter
 }
 
-func New(cfg *config.Config, log zerolog.Logger, apiKeyRepo *storage.APIKeyRepository, rateLimiter *ratelimit.TokenBucket) *Gateway {
+func New(cfg *config.Config, log zerolog.Logger, apiKeyRepo *storage.APIKeyRepository, rateLimiter *ratelimit.TokenBucket, analyticsAdapter *storage.AnalyticsAdapter) *Gateway {
 	r := chi.NewRouter()
 	adapter := storage.NewAPIKeyAdapter(apiKeyRepo)
 	rp := proxy.New(log)
 	gw := &Gateway{
-		config:        cfg,
-		router:        r,
-		log:           log,
-		apiKeyRepo:    apiKeyRepo,
-		apiKeyAdapter: adapter,
-		rateLimiter:   rateLimiter,
-		proxy:         rp,
+		config:           cfg,
+		router:           r,
+		log:              log,
+		apiKeyRepo:       apiKeyRepo,
+		apiKeyAdapter:    adapter,
+		rateLimiter:      rateLimiter,
+		proxy:            rp,
+		analyticsAdapter: analyticsAdapter,
 		server: &http.Server{
 			Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
 			Handler:      r,
@@ -55,8 +57,10 @@ func New(cfg *config.Config, log zerolog.Logger, apiKeyRepo *storage.APIKeyRepos
 }
 
 func (gw *Gateway) setupMiddleware() {
+	gw.router.Use(middleware.Recovery(gw.log))
 	gw.router.Use(middleware.RequestID)
 	gw.router.Use(middleware.Logging(gw.log))
+	gw.router.Use(middleware.Analytics(gw.analyticsAdapter))
 }
 
 func (gw *Gateway) setupRoutes() {
