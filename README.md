@@ -2,8 +2,6 @@
 
 An enterprise-grade reverse proxy built with Go, MongoDB, and Redis. Sits between clients and backend microservices providing authentication, rate limiting, circuit breaking, request transformation, and analytics.
 
-**Performance targets:** 50,000+ req/s · <5ms p95 gateway overhead · 99.9% uptime
-
 ---
 
 ## Table of Contents
@@ -18,23 +16,23 @@ An enterprise-grade reverse proxy built with Go, MongoDB, and Redis. Sits betwee
 - [Rate Limiting](#rate-limiting)
 - [Circuit Breaker](#circuit-breaker)
 - [MongoDB Schema](#mongodb-schema)
-- [Testing](#testing)
-- [Load Testing](#load-testing)
-- [Deployment](#deployment)
 - [Monitoring](#monitoring)
+- [Future Improvements](#future-improvements)
 
 ---
 
 ## Features
 
-- **Authentication** — API key (header/query param), JWT, OAuth2 token introspection
-- **Rate Limiting** — Token bucket, sliding window, and concurrent request limiting via Redis Lua scripts
-- **Circuit Breaker** — State machine (Closed → Open → Half-Open) with configurable thresholds
-- **Request Transformation** — Per-route header injection/stripping, path rewriting
-- **Reverse Proxy** — `httputil.ReverseProxy` with round-robin load balancing
-- **Analytics** — MongoDB time-series request logs with 30-day TTL
-- **Observability** — Prometheus metrics + Zerolog structured JSON logging + Grafana dashboards
-- **Dynamic Config** — Routes and backends loaded from MongoDB with hot-reload via change streams
+- **Authentication** — API key validation via header (`X-API-Key`), query parameter, or `Authorization: Bearer` header
+- **Rate Limiting** — Token bucket algorithm with configurable rate and burst, implemented as an atomic Redis Lua script
+- **Circuit Breaker** — Per-backend state machine (Closed → Open → Half-Open) with configurable error threshold, timeout, and success threshold
+- **Request Transformation** — Per-route header injection/stripping, path prefix rewriting
+- **Reverse Proxy** — `httputil.ReverseProxy` with round-robin load balancing across multiple backends
+- **Analytics** — Async request logging to MongoDB via buffered channels with batch writes
+- **Observability** — Prometheus metrics (counters, histograms, gauges) + Zerolog structured JSON logging
+- **Dynamic Config** — Backends loaded from MongoDB at startup with hot-reload via change streams (requires replica set)
+- **Graceful Shutdown** — OS signal handling with in-flight request draining
+- **Panic Recovery** — Middleware that catches panics and returns 500 instead of crashing
 
 ---
 
@@ -42,23 +40,20 @@ An enterprise-grade reverse proxy built with Go, MongoDB, and Redis. Sits betwee
 
 | Component | Technology |
 |-----------|-----------|
-| Language | Go 1.21+ |
+| Language | Go 1.25 |
 | HTTP Router | Chi v5 |
 | Database | MongoDB 7+ |
 | Cache / Rate Limiting | Redis 7+ |
 | Metrics | Prometheus |
 | Logging | Zerolog |
-| Testing | Testify + miniredis |
-| Load Testing | k6 |
 
 ---
 
 ## Prerequisites
 
 - Go 1.21+
-- Docker & Docker Compose
-- MongoDB 7+ (or use the provided Compose file)
-- Redis 7+ (or use the provided Compose file)
+- MongoDB 7+ (local or Docker)
+- Redis 7+ (local via Memurai on Windows, or Docker)
 
 ---
 
@@ -67,26 +62,70 @@ An enterprise-grade reverse proxy built with Go, MongoDB, and Redis. Sits betwee
 ### 1. Clone and install dependencies
 
 ```bash
-git clone https://github.com/yourusername/api-gateway.git
-cd api-gateway
+git clone https://github.com/carissaayo/go-api-gateway.git
+cd go-api-gateway
 go mod download
 ```
 
 ### 2. Start infrastructure
 
-```bash
-docker-compose -f docker/docker-compose.yml up -d mongo redis
-```
+Make sure MongoDB and Redis are running locally. On Windows, Redis can be run via [Memurai](https://www.memurai.com/).
 
 ### 3. Seed test data
 
-```bash
-bash scripts/seed_data.sh
+Using MongoDB Compass (or `mongosh`), connect to `mongodb://localhost:27017` and create the following in the `api_gateway` database.
+
+**Collection: `api_keys`**
+
+```json
+{
+  "api_key": "gw_test_key",
+  "user_id": "user_1",
+  "name": "Test Key",
+  "scopes": ["read", "write"],
+  "rate_limit": {
+    "algorithm": "token_bucket",
+    "requests_per_second": 100,
+    "burst_size": 200,
+    "concurrent_limit": 10
+  },
+  "created_at": { "$date": "2026-03-06T00:00:00Z" },
+  "expires_at": { "$date": "2027-01-01T00:00:00Z" },
+  "enabled": true
+}
 ```
 
-This creates a test API key (`gw_test_key`) and registers a sample backend.
+**Collection: `backends`**
 
-### 4. Run the gateway
+```json
+{
+  "name": "test-service",
+  "url": "http://localhost:3001",
+  "weight": 1,
+  "enabled": true,
+  "health_check": {
+    "path": "/health",
+    "interval": 30,
+    "timeout": 5
+  },
+  "circuit_breaker": {
+    "error_threshold": 0.5,
+    "timeout": 30,
+    "max_requests": 10,
+    "success_threshold": 5
+  }
+}
+```
+
+### 4. Run a backend service
+
+Start any HTTP server on port 3001 to act as the upstream backend:
+
+```bash
+npx http-server -p 3001
+```
+
+### 5. Run the gateway
 
 ```bash
 cp .env.example .env
@@ -95,10 +134,17 @@ go run cmd/gateway/main.go
 
 Gateway starts on `http://localhost:8080`.
 
-### 5. Test it
+### 6. Test it
 
 ```bash
-curl -H "X-API-Key: gw_test_key" http://localhost:8080/api/test
+# Health check (no auth)
+curl.exe http://localhost:8080/health
+
+# Authenticated request (proxied to backend)
+curl.exe -H "X-API-Key: gw_test_key" http://localhost:8080/api/test
+
+# Without key (returns 401)
+curl.exe http://localhost:8080/api/test
 ```
 
 ---
@@ -110,6 +156,9 @@ All config is loaded from environment variables (see `.env.example`):
 ```env
 # Server
 SERVER_PORT=8080
+SERVER_READ_TIMEOUT=15s
+SERVER_WRITE_TIMEOUT=15s
+SERVER_IDLE_TIMEOUT=60s
 
 # MongoDB
 MONGODB_URI=mongodb://localhost:27017
@@ -128,52 +177,48 @@ LOG_FORMAT=json       # json | pretty
 ## Project Structure
 
 ```
-api-gateway/
+go-api-gateway/
 ├── cmd/
 │   └── gateway/
-│       └── main.go                 # Entry point, graceful shutdown
+│       └── main.go                    # Entry point, dependency wiring, graceful shutdown
 ├── internal/
 │   ├── config/
-│   │   └── config.go              # Env-based config loading
+│   │   └── config.go                 # Env-based config loading with validation
 │   ├── gateway/
-│   │   ├── gateway.go             # Core gateway, middleware orchestration
-│   │   ├── backend.go             # Backend registry, health checks
-│   │   └── route.go               # Route definitions
+│   │   ├── gateway.go                # Core gateway struct, middleware + route setup
+│   │   ├── backend.go                # Backend registration helper
+│   │   └── loader.go                 # Dynamic backend loading + change stream watcher
 │   ├── middleware/
-│   │   ├── auth.go                # API key / JWT validation
-│   │   ├── ratelimit.go           # Rate limit middleware
-│   │   ├── circuitbreaker.go      # Circuit breaker middleware
-│   │   ├── transform.go           # Request/response transformation
-│   │   ├── analytics.go           # Async request logging
-│   │   └── recovery.go            # Panic recovery
+│   │   ├── auth.go                   # API key validation middleware
+│   │   ├── ratelimit.go              # Rate limit middleware
+│   │   ├── transform.go              # Request/response header transformation
+│   │   ├── analytics.go              # Prometheus metrics + async MongoDB logging
+│   │   ├── logging.go                # Structured request logging
+│   │   ├── request_id.go             # UUID request ID generation
+│   │   └── recovery.go               # Panic recovery
 │   ├── ratelimit/
-│   │   ├── token_bucket.go        # Token bucket algorithm
-│   │   ├── sliding_window.go      # Sliding window algorithm
-│   │   ├── concurrent.go          # Concurrent request limiter
+│   │   ├── token_bucket.go           # Token bucket algorithm (Go + Redis)
 │   │   └── lua/
-│   │       └── token_bucket.lua   # Atomic Redis Lua script
+│   │       └── token_bucket.lua      # Atomic Redis Lua script
 │   ├── circuitbreaker/
-│   │   └── circuitbreaker.go      # State machine implementation
+│   │   └── circuitbreaker.go         # State machine (Closed/Open/Half-Open)
 │   ├── storage/
-│   │   ├── mongodb.go             # MongoDB client
-│   │   ├── apikey.go              # API key repository
-│   │   └── analytics.go           # Analytics repository
+│   │   ├── mongodb.go                # MongoDB client wrapper
+│   │   ├── apikey.go                 # API key repository
+│   │   ├── apikey_adapter.go         # API key adapter (storage → middleware types)
+│   │   ├── analytics.go              # Async analytics repository (buffered channel + batch writes)
+│   │   ├── analytics_adapter.go      # Analytics adapter (middleware → storage types)
+│   │   └── backend.go                # Backend config repository
 │   ├── redis/
-│   │   └── client.go              # Redis client wrapper
+│   │   └── client.go                 # Redis client wrapper
 │   ├── proxy/
-│   │   └── reverse_proxy.go       # Custom reverse proxy
+│   │   └── reverse_proxy.go          # Reverse proxy with round-robin + circuit breaker
+│   ├── logger/
+│   │   └── logger.go                 # Zerolog configuration
 │   └── metrics/
-│       └── metrics.go             # Prometheus metric definitions
-├── scripts/
-│   ├── load_test.js               # k6 load test
-│   └── seed_data.sh               # Seed MongoDB with test data
-├── docker/
-│   ├── Dockerfile
-│   └── docker-compose.yml
-├── deployments/
-│   └── kubernetes/                # K8s manifests
+│       └── metrics.go                # Prometheus metric definitions
 ├── .env.example
-├── Makefile
+├── .gitignore
 └── README.md
 ```
 
@@ -186,18 +231,19 @@ api-gateway/
 | Header | Required | Description |
 |--------|----------|-------------|
 | `X-API-Key` | Yes* | API key for authentication |
-| `Authorization` | Yes* | `Bearer <jwt>` for JWT auth |
+| `Authorization` | Yes* | `Bearer <key>` as alternative to X-API-Key |
 
-*One of the two is required depending on route config.
+*API key can also be passed as `?api_key=` query parameter.
 
 ### Response Headers
 
 | Header | Description |
 |--------|-------------|
-| `X-RateLimit-Limit` | Configured requests per second |
+| `X-RateLimit-Limit` | Configured burst size |
 | `X-RateLimit-Remaining` | Tokens remaining in current window |
 | `Retry-After` | Seconds until quota resets (on 429) |
 | `X-Request-ID` | Unique request ID for tracing |
+| `X-Powered-By` | Gateway identifier (via response transform) |
 
 ### Status Codes
 
@@ -206,13 +252,14 @@ api-gateway/
 | `401 Unauthorized` | Missing or invalid API key |
 | `403 Forbidden` | Key disabled or expired |
 | `429 Too Many Requests` | Rate limit exceeded |
-| `503 Service Unavailable` | Circuit breaker is OPEN |
+| `502 Bad Gateway` | Backend unreachable |
+| `503 Service Unavailable` | Circuit breaker is OPEN or no backends available |
 
 ### Health Endpoints
 
 ```
 GET /health   → 200 OK  (liveness)
-GET /ready    → 200 OK  (readiness — checks MongoDB + Redis connectivity)
+GET /ready    → 200 OK  (readiness)
 GET /metrics  → Prometheus metrics exposition
 ```
 
@@ -220,11 +267,11 @@ GET /metrics  → Prometheus metrics exposition
 
 ## Rate Limiting
 
-Three algorithms are available per API key, configured in the `api_keys` MongoDB collection.
+Rate limits are configured per API key in the `api_keys` MongoDB collection.
 
-### Token Bucket (default)
+### Token Bucket
 
-Tokens refill at a constant rate. Allows bursts up to `burst_size`.
+Tokens refill at a constant rate. Allows bursts up to `burst_size`. Implemented as an atomic Redis Lua script — no race conditions under concurrent load.
 
 ```json
 "rate_limit": {
@@ -234,33 +281,12 @@ Tokens refill at a constant rate. Allows bursts up to `burst_size`.
 }
 ```
 
-### Sliding Window
+The rate limiter **fails open** — if Redis is unreachable, requests are allowed through rather than blocking all traffic.
 
-Counts exact requests within a rolling time window. No burst allowance.
-
-```json
-"rate_limit": {
-  "algorithm": "sliding_window",
-  "requests_per_second": 100
-}
-```
-
-### Concurrent Limiter
-
-Limits the number of simultaneously in-flight requests per key.
-
-```json
-"rate_limit": {
-  "concurrent_limit": 10
-}
-```
-
-### Redis Key Patterns
+### Redis Key Pattern
 
 ```
 rate_limit:token_bucket:{api_key}
-rate_limit:sliding_window:{api_key}
-rate_limit:concurrent:{api_key}
 ```
 
 ---
@@ -270,14 +296,23 @@ rate_limit:concurrent:{api_key}
 Per-backend state machine protecting against cascading failures.
 
 ```
-CLOSED → OPEN → HALF-OPEN → CLOSED
-                          ↘ OPEN
+CLOSED ──(error rate exceeds threshold)──→ OPEN
+  ↑                                          │
+  │                                     (timeout expires)
+  │                                          │
+  │                                          ▼
+  └──(enough consecutive successes)──── HALF-OPEN
+                                          │
+                                (test request fails)
+                                          │
+                                          ▼
+                                        OPEN
 ```
 
 | State | Behaviour |
 |-------|-----------|
-| **CLOSED** | Normal operation. Tracks error rate. |
-| **OPEN** | Returns 503 immediately. No requests forwarded. |
+| **CLOSED** | Normal operation. Tracks error rate over a rolling window. |
+| **OPEN** | Returns 503 immediately. No requests forwarded to backend. |
 | **HALF-OPEN** | Allows `max_requests` test requests through. |
 
 ### Configuration (per backend in MongoDB)
@@ -285,7 +320,6 @@ CLOSED → OPEN → HALF-OPEN → CLOSED
 ```json
 "circuit_breaker": {
   "max_requests": 10,
-  "interval": 60,
   "timeout": 30,
   "error_threshold": 0.5,
   "success_threshold": 5
@@ -295,7 +329,6 @@ CLOSED → OPEN → HALF-OPEN → CLOSED
 | Field | Default | Description |
 |-------|---------|-------------|
 | `max_requests` | 10 | Max test requests in HALF-OPEN |
-| `interval` | 60s | Rolling window for error rate tracking |
 | `timeout` | 30s | Time to stay OPEN before testing |
 | `error_threshold` | 0.5 | Error rate (0–1) that trips the breaker |
 | `success_threshold` | 5 | Consecutive successes to close from HALF-OPEN |
@@ -308,15 +341,14 @@ CLOSED → OPEN → HALF-OPEN → CLOSED
 
 ```json
 {
-  "api_key": "gw_abc123",
-  "user_id": "user_123",
-  "name": "Production Key",
-  "scopes": ["read:users", "write:posts"],
+  "api_key": "gw_test_key",
+  "user_id": "user_1",
+  "name": "Test Key",
+  "scopes": ["read", "write"],
   "rate_limit": {
     "algorithm": "token_bucket",
     "requests_per_second": 100,
-    "burst_size": 200,
-    "concurrent_limit": 10
+    "burst_size": 200
   },
   "created_at": "2026-03-01T00:00:00Z",
   "expires_at": "2027-03-01T00:00:00Z",
@@ -330,108 +362,49 @@ CLOSED → OPEN → HALF-OPEN → CLOSED
 {
   "name": "user-service",
   "url": "http://user-service:3001",
-  "health_check": { "path": "/health", "interval": 30, "timeout": 5 },
-  "circuit_breaker": { "error_threshold": 0.5, "timeout": 30 },
   "weight": 1,
-  "enabled": true
+  "enabled": true,
+  "health_check": { "path": "/health", "interval": 30, "timeout": 5 },
+  "circuit_breaker": { "error_threshold": 0.5, "timeout": 30, "max_requests": 10, "success_threshold": 5 }
 }
 ```
 
-### `routes`
+### `request_logs`
+
+Written asynchronously by the analytics pipeline. Documents appear within 5 seconds of request completion.
 
 ```json
 {
-  "path": "/api/users",
-  "methods": ["GET", "POST"],
-  "backend": "user-service",
-  "strip_path": true,
-  "middlewares": ["auth", "ratelimit", "circuitbreaker"],
-  "transform": {
-    "request": { "add_headers": { "X-Gateway": "v1" } },
-    "response": { "remove_headers": ["X-Internal-Token"] }
-  }
+  "timestamp": "2026-03-06T15:52:09Z",
+  "method": "GET",
+  "path": "/api/test",
+  "status_code": 200,
+  "duration_ms": 20,
+  "api_key": "gw_test_key",
+  "request_id": "fc4d92e1-b50f-45af-9e3d-1d5cd18186d3"
 }
 ```
-
----
-
-## Testing
-
-```bash
-# Run all tests
-go test ./...
-
-# Run with race detector
-go test -race ./...
-
-# Run specific package
-go test ./internal/ratelimit/...
-
-# With coverage
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
-```
-
-Unit tests use [miniredis](https://github.com/alicebob/miniredis) for Redis and [testcontainers-go](https://github.com/testcontainers/testcontainers-go) for MongoDB integration tests — no real infrastructure required.
-
----
-
-## Load Testing
-
-Requires [k6](https://k6.io/docs/getting-started/installation/).
-
-```bash
-k6 run scripts/load_test.js
-```
-
-Default scenario: ramp to 100 virtual users over 30s, hold for 1 minute, ramp down.
-
-**Thresholds:**
-- p95 request duration < 500ms
-- Error rate < 1%
-
-To test rate limiting specifically:
-
-```bash
-k6 run --vus 200 --duration 30s scripts/load_test.js
-```
-
----
-
-## Deployment
-
-### Docker Compose (local / staging)
-
-```bash
-docker-compose -f docker/docker-compose.yml up --build
-```
-
-### Kubernetes (production)
-
-```bash
-# Create secrets
-kubectl create secret generic gateway-secrets \
-  --from-literal=mongodb-uri='mongodb://...' \
-  --from-literal=redis-url='redis://...'
-
-# Apply manifests
-kubectl apply -f deployments/kubernetes/
-```
-
-The Kubernetes deployment runs 3 replicas with liveness (`/health`) and readiness (`/ready`) probes. Resources: 128Mi–512Mi memory, 250m–1000m CPU per pod.
 
 ---
 
 ## Monitoring
 
-### Prometheus + Grafana
+### Prometheus Metrics
 
 ```bash
-# Metrics endpoint
 curl http://localhost:8080/metrics
 ```
 
-Key metrics:
+Key metrics exposed:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `gateway_requests_total` | Counter | Total requests by method, path, status |
+| `gateway_request_duration_seconds` | Histogram | Request latency distribution |
+| `gateway_rate_limit_hits_total` | Counter | Total rate-limited requests |
+| `gateway_circuit_breaker_state` | Gauge | Circuit breaker state per backend |
+
+Example PromQL queries:
 
 ```promql
 # Request rate
@@ -445,9 +418,6 @@ histogram_quantile(0.95, rate(gateway_request_duration_seconds_bucket[5m]))
 
 # Rate limit hit rate
 rate(gateway_rate_limit_hits_total[5m])
-
-# Circuit breakers currently open
-sum(gateway_circuit_breaker_state == 1)
 ```
 
 ### MongoDB Analytics
@@ -456,35 +426,28 @@ sum(gateway_circuit_breaker_state == 1)
 // Top 10 endpoints by request volume (last 24h)
 db.request_logs.aggregate([
   { $match: { timestamp: { $gte: new Date(Date.now() - 86400000) } } },
-  { $group: { _id: "$metadata.route", count: { $sum: 1 }, avg_latency: { $avg: "$latency_ms" } } },
+  { $group: { _id: "$path", count: { $sum: 1 }, avg_latency: { $avg: "$duration_ms" } } },
   { $sort: { count: -1 } },
   { $limit: 10 }
-])
-
-// Error rate by backend
-db.request_logs.aggregate([
-  { $group: {
-    _id: "$metadata.backend",
-    total: { $sum: 1 },
-    errors: { $sum: { $cond: [{ $gte: ["$metadata.status_code", 400] }, 1, 0] } }
-  }},
-  { $project: { error_rate: { $multiply: [{ $divide: ["$errors", "$total"] }, 100] } } }
 ])
 ```
 
 ---
 
-## Makefile
+## Future Improvements
 
-```bash
-make run          # Start gateway locally
-make test         # Run test suite
-make lint         # Run golangci-lint
-make build        # Build binary to ./bin/gateway
-make docker       # Build Docker image
-make seed         # Seed MongoDB with test data
-make load-test    # Run k6 load test
-```
+- [ ] JWT and OAuth2 token introspection authentication
+- [ ] Sliding window and concurrent request rate limiting algorithms
+- [ ] Backend health checks (active polling)
+- [ ] Dockerfile and Docker Compose setup
+- [ ] Kubernetes deployment manifests
+- [ ] k6 load testing scripts
+- [ ] Makefile for common operations
+- [ ] Seed data script (`scripts/seed_data.sh`)
+- [ ] Unit tests with miniredis and testcontainers-go
+- [ ] Grafana dashboard templates
+- [ ] MongoDB TTL index on `request_logs` (30-day retention)
+- [ ] Per-route transform configuration loaded from MongoDB
 
 ---
 
