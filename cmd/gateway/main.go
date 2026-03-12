@@ -48,14 +48,16 @@ func main() {
 	backendRepo := storage.NewBackendRepository(db)
 	rateLimiter := ratelimit.NewTokenBucket(rc.GetClient())
 
-	gw := gateway.New(cfg, log, apiKeyRepo, rateLimiter)
+	analyticsRepo := storage.NewAnalyticsRepository(db, log, 1000)
+	defer analyticsRepo.Close()
+	analyticsAdapter := storage.NewAnalyticsAdapter(analyticsRepo)
 
-	// Load backends from MongoDB
+	gw := gateway.New(cfg, log, apiKeyRepo, rateLimiter, analyticsAdapter)
+
 	if err := gw.LoadBackends(context.Background(), backendRepo); err != nil {
 		log.Error().Err(err).Msg("failed to load backends from database")
 	}
 
-	// Watch for backend changes in background
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 	defer watchCancel()
 	go gw.WatchBackends(watchCtx, backendRepo)
